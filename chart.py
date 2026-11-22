@@ -53,6 +53,30 @@ def summary(trades):
     n = tp + sl
     return f"{n} closed trades | TP {tp} | SL {sl} | win rate {tp/n*100 if n else 0:.0f}% | total {2*tp - sl:+d}R (before costs)"
 
+def render_alert(df, sig, r, path, bars=110):
+    """نمودار ۴ ساعته برای پیام تلگرام: ورود، SL، TP + EMA و دانچیان"""
+    side, e, sl, tp = r
+    c, h, l = df["Close"], df["High"], df["Low"]
+    e50, e200 = (c.ewm(span=n, adjust=False).mean() for n in (50, 200))
+    dh, dl = h.rolling(20).max().shift(), l.rolling(20).min().shift()
+    N = min(bars, len(df)); k = len(df) - N; d = df.iloc[k:]; x = np.arange(N)
+    fig, ax = plt.subplots(figsize=(11, 6.5), dpi=110)
+    up = (d["Close"] >= d["Open"]).values; cc = np.where(up, "#1a9e5c", "#d6453d")
+    ax.vlines(x, d["Low"], d["High"], color=cc, lw=1)
+    ax.bar(x, (d["Close"] - d["Open"]).abs(), bottom=np.minimum(d["Open"], d["Close"]), width=0.65, color=cc)
+    ax.plot(x, e50.iloc[k:], color=Y, lw=1.6, label="EMA 50"); ax.plot(x, e200.iloc[k:], color=B, lw=1.8, label="EMA 200")
+    ax.plot(x, dh.iloc[k:], color=GR, lw=1, ls="--", label="Donchian 20"); ax.plot(x, dl.iloc[k:], color=GR, lw=1, ls="--")
+    ax.scatter(N - 1, e, marker="^" if side == "BUY" else "v", s=220, color="#222", zorder=6)
+    for v, col, nm in ((e, "#222", "Entry"), (sl, R_, "SL"), (tp, G, "TP")):
+        ax.hlines(v, N - 1, N + 8, colors=col, linestyles="-" if nm == "Entry" else ":", lw=1.6)
+        ax.text(N + 8.5, v, f"{nm} {v:.1f}", va="center", fontsize=9, color=col)
+    step = max(1, N // 7)
+    ax.set_xticks(x[::step]); ax.set_xticklabels([t.strftime("%m-%d %H:%M") for t in d.index[::step]], fontsize=8)
+    ax.set_xlim(-1, N + 18); ax.grid(alpha=0.2); ax.legend(loc="upper left", fontsize=8)
+    ax.set_title(f"Gold {gold.SYMBOL} 4H - {side} (New York time)", fontsize=11)
+    fig.tight_layout(); fig.savefig(path); plt.close(fig)
+    return path
+
 def main():
     df = gold.load()
     c, h, l = df["Close"], df["High"], df["Low"]

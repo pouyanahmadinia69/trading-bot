@@ -1,12 +1,14 @@
 """مانیتور طلا: روند + پولبک + برگشت مومنتوم (تایم‌فریم ۴ ساعته)
 اجرا:  python gold.py            -> بررسی سیگنال و ارسال تلگرام
        python gold.py backtest   -> بک‌تست روی حدود ۲ سال داده"""
-import os, sys, json, urllib.request, urllib.parse
+import os, sys, json, math, urllib.request, urllib.parse
 import pandas as pd, yfinance as yf
 
 SYMBOL = os.getenv("SYMBOL", "GC=F")
 STATE = "gold_state.json"
 RR = 2.0  # نسبت سود به ریسک
+RISK_USD = float(os.getenv("RISK_USD", "1"))  # ریسک هر معامله (دلار)
+PER_LOT = 1.0  # سود/ضرر دلاری به ازای هر ۱$ حرکت قیمت برای ۱.۰۰ لات (حساب سنتی XAUUSD_l)
 
 def load(period="730d"):
     df = yf.download(SYMBOL, period=period, interval="1h", auto_adjust=True, progress=False)
@@ -78,25 +80,66 @@ def backtest(df):
     print(f"تعداد معامله: {len(s)} | نرخ برد: {(s>0).mean()*100:.1f}% | میانگین R: {s.mean():.2f} | مجموع R: {s.sum():.1f} | بدترین افت: {(eq-eq.cummax()).min():.1f}R")
     print("توجه: اسپرد، کمیسیون و اسلیپیج لحاظ نشده است.")
 
-def notify(text):
+def lot_size(d):
+    """حجم بر اساس ریسک ثابت؛ گرد به پایین روی گام ۰.۰۱"""
+    lot = math.floor(RISK_USD / (d * PER_LOT) * 100 + 1e-9) / 100
+    warn = ""
+    if lot < 0.01:
+        lot, warn = 0.01, "\n⚠️ حد ضرر دور است؛ حتی کمترین حجم (۰.۰۱) ریسک را از حد تعیین‌شده بالاتر می‌برد."
+    return lot, lot * d * PER_LOT, warn
+
+def send(text, photo=None):
     tok, chat = os.getenv("TELEGRAM_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
     print(text)
-    if tok and chat:
-        data = urllib.parse.urlencode({"chat_id": chat, "text": text}).encode()
-        urllib.request.urlopen(f"https://api.telegram.org/bot{tok}/sendMessage", data, timeout=20)
+    if not (tok and chat): return
+    if photo:
+        try:
+            b = "----gold" + os.urandom(4).hex()
+            parts = [f'--{b}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+                     for k, v in (("chat_id", chat), ("caption", text[:1000]))]
+            parts.append(f'--{b}\r\nContent-Disposition: form-data; name="photo"; filename="chart.png"\r\nContent-Type: image/png\r\n\r\n'.encode()
+                         + open(photo, "rb").read() + b"\r\n")
+            parts.append(f"--{b}--\r\n".encode())
+            req = urllib.request.Request(f"https://api.telegram.org/bot{tok}/sendPhoto", b"".join(parts),
+                                         {"Content-Type": f"multipart/form-data; boundary={b}"})
+            urllib.request.urlopen(req, timeout=30); return
+        except Exception as ex:
+            print("ارسال عکس ناموفق:", ex)
+    data = urllib.parse.urlencode({"chat_id": chat, "text": text}).encode()
+    urllib.request.urlopen(f"https://api.telegram.org/bot{tok}/sendMessage", data, timeout=20)
 
 def main():
     df = load()
     if len(sys.argv) > 1 and sys.argv[1] == "backtest":
         return backtest(df)
+    demo = os.getenv("DEMO", "").lower() == "true"
     sig = signals_donchian(df); r = levels_donchian(df, sig, -1)
     ts = str(df.index[-1])
     last = json.load(open(STATE)).get("ts") if os.path.exists(STATE) else None
-    if r and ts != last:
+    if demo and not r:  # سیگنال آزمایشی برای تست پیام و نمودار
+        c, a = float(df["Close"].iloc[-1]), float(sig["atr"].iloc[-1])
+        r = ("BUY", c, c - 2 * a, c + 4 * a)
+    if r and (demo or ts != last):
         side, e, sl, tp = r
+        d = abs(e - sl); lot, risk, warn = lot_size(d)
         icon = "🟢 خرید" if side == "BUY" else "🔴 فروش"
-        notify(f"{icon} طلا ({SYMBOL})\nورود: حدود {e:.1f}\nحد ضرر: {sl:.1f}\nحد سود: {tp:.1f}\nریسک به سود: 1:{RR:.0f}\nکندل ۴ساعته: {ts}")
-        json.dump({"ts": ts}, open(STATE, "w"))
+        text = (("🧪 تست (سیگنال واقعی نیست)\n" if demo else "") +
+                f"{icon} طلا | کندل ۴ساعته\n"
+                f"ورود (قیمت {SYMBOL}): حدود {e:.1f}\n"
+                f"حد ضرر: {sl:.1f}  (فاصله {d:.1f}$)\n"
+                f"حد سود: {tp:.1f}  (فاصله {2*d:.1f}$)\n"
+                f"حجم: {lot:.2f} لات\n"
+                f"ریسک: {risk:.2f}$ ({risk*100:.0f} سنت) | سود هدف: {2*risk:.2f}$\n"
+                f"⚠️ قیمت بروکر چند دلار با {SYMBOL} فرق دارد؛ فاصله‌ها را از قیمت لحظه‌ای بروکر اعمال کنید.{warn}")
+        photo = None
+        try:
+            import chart
+            photo = chart.render_alert(df, sig, r, "alert.png")
+        except Exception as ex:
+            print("نمودار ساخته نشد:", ex)
+        send(text, photo)
+        if not demo:
+            json.dump({"ts": ts}, open(STATE, "w"))
     else:
         print("سیگنالی نیست. آخرین کندل:", ts)
 
