@@ -43,8 +43,26 @@ def levels(df, sig, i):
         sl = float(sig["sl_s"].iloc[i]); return "SELL", c, sl, c - RR * (sl - c)
     return None
 
+
+def signals_donchian(df):
+    """شکست سقف/کف ۲۰ کندل در جهت روند (آزمایش‌شده در gold_lab: بهترین نتیجه)"""
+    h, l, c = df["High"], df["Low"], df["Close"]
+    e50, e200 = (c.ewm(span=n, adjust=False).mean() for n in (50, 200))
+    tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1/14, adjust=False).mean()
+    buy = (e50 > e200) & (c > e200) & (c > h.rolling(20).max().shift())
+    sell = (e50 < e200) & (c < e200) & (c < l.rolling(20).min().shift())
+    buy, sell = buy & ~buy.shift(fill_value=False), sell & ~sell.shift(fill_value=False)  # فقط اولین کندل شکست
+    return pd.DataFrame({"buy": buy, "sell": sell, "atr": atr}, index=df.index)
+
+def levels_donchian(df, sig, i):
+    c, a = float(df["Close"].iloc[i]), float(sig["atr"].iloc[i])
+    if sig["buy"].iloc[i]: return "BUY", c, c - 2 * a, c + 4 * a
+    if sig["sell"].iloc[i]: return "SELL", c, c + 2 * a, c - 4 * a
+    return None
+
 def backtest(df):
-    sig = signals(df); R = []; pos = None
+    sig = signals_donchian(df); R = []; pos = None
     for i in range(len(df)):
         if pos:
             side, e, sl, tp = pos
@@ -54,7 +72,7 @@ def backtest(df):
             if hit_sl: R.append(-1.0); pos = None   # اگر هر دو در یک کندل بخورد، ضرر حساب می‌شود (محافظه‌کارانه)
             elif hit_tp: R.append(RR); pos = None
             continue
-        pos = levels(df, sig, i)
+        pos = levels_donchian(df, sig, i)
     if not R: print("معامله‌ای پیدا نشد"); return
     s = pd.Series(R); eq = s.cumsum()
     print(f"تعداد معامله: {len(s)} | نرخ برد: {(s>0).mean()*100:.1f}% | میانگین R: {s.mean():.2f} | مجموع R: {s.sum():.1f} | بدترین افت: {(eq-eq.cummax()).min():.1f}R")
@@ -71,13 +89,13 @@ def main():
     df = load()
     if len(sys.argv) > 1 and sys.argv[1] == "backtest":
         return backtest(df)
-    sig = signals(df); r = levels(df, sig, -1)
+    sig = signals_donchian(df); r = levels_donchian(df, sig, -1)
     ts = str(df.index[-1])
     last = json.load(open(STATE)).get("ts") if os.path.exists(STATE) else None
     if r and ts != last:
         side, e, sl, tp = r
         icon = "🟢 خرید" if side == "BUY" else "🔴 فروش"
-        notify(f"{icon} طلا ({SYMBOL})\nورود: {e:.1f}\nحد ضرر: {sl:.1f}\nحد سود: {tp:.1f}\nریسک به سود: 1:{RR:.0f}\nکندل ۴ساعته: {ts}")
+        notify(f"{icon} طلا ({SYMBOL})\nورود: حدود {e:.1f}\nحد ضرر: {sl:.1f}\nحد سود: {tp:.1f}\nریسک به سود: 1:{RR:.0f}\nکندل ۴ساعته: {ts}")
         json.dump({"ts": ts}, open(STATE, "w"))
     else:
         print("سیگنالی نیست. آخرین کندل:", ts)
