@@ -77,6 +77,34 @@ def render_alert(df, sig, r, path, bars=110):
     fig.tight_layout(); fig.savefig(path); plt.close(fig)
     return path
 
+def write_report(df, trades, path="trades_2y.txt"):
+    """لیست همه معاملات ۲ سال اخیر + آمار (نرخ برد کل، خرید/فروش، باخت‌های متوالی، افت)"""
+    done = [t for t in trades if t["res"] in ("TP", "SL")]
+    R = [2.0 if t["res"] == "TP" else -1.0 for t in done]
+    def rate(sub):
+        w = sum(t["res"] == "TP" for t in sub)
+        return f"{len(sub)} معامله | TP {w} | SL {len(sub)-w} | نرخ برد {w/len(sub)*100:.1f}%" if sub else "0 معامله"
+    eq, peak, dd, run, mx = 0.0, 0.0, 0.0, 0, 0
+    for r in R:
+        eq += r; peak = max(peak, eq); dd = min(dd, eq - peak)
+        run = run + 1 if r < 0 else 0; mx = max(mx, run)
+    half = len(df) // 2
+    lines = ["بک‌تست استراتژی دانچیان ۲۰ + فیلتر روند | طلا ۴ ساعته | حد ضرر 2ATR | حد سود 4ATR (۱ به ۲)",
+             f"بازه: {df.index[0].date()} تا {df.index[-1].date()}  (وقت نیویورک، ورود در قیمت بسته شدن کندل سیگنال، بدون هزینه اسپرد)", "",
+             "نرخ برد کل : " + rate(done),
+             "فقط خرید   : " + rate([t for t in done if t["side"] == "BUY"]),
+             "فقط فروش   : " + rate([t for t in done if t["side"] == "SELL"]),
+             "نیمه اول   : " + rate([t for t in done if t["i"] < half]),
+             "نیمه دوم   : " + rate([t for t in done if t["i"] >= half]),
+             f"میانگین هر معامله: {sum(R)/len(R):+.2f}R | مجموع: {sum(R):+.1f}R | بدترین افت: {dd:.1f}R | بیشترین باخت متوالی: {mx}" if R else "",
+             f"سربه‌سر شدن در نسبت ۱ به ۲ نیاز به نرخ برد 33.3% دارد.", "",
+             "شماره | تاریخ ورود (NY)   | نوع  | ورود    | SL      | TP      | نتیجه | R"]
+    for k, t in enumerate(trades, 1):
+        r = {"TP": "+2", "SL": "-1", "OPEN": "باز"}[t["res"]]
+        lines.append(f"{k:>4}  | {df.index[t['i']].strftime('%Y-%m-%d %H:%M')} | {t['side']:<4} | {t['e']:7.1f} | {t['sl']:7.1f} | {t['tp']:7.1f} | {t['res']:<4}  | {r}")
+    open(path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+    print("\n".join(lines[:12]))
+
 def main():
     df = gold.load()
     c, h, l = df["Close"], df["High"], df["Low"]
@@ -84,6 +112,7 @@ def main():
     dh, dl = h.rolling(20).max().shift(), l.rolling(20).min().shift()
     sig = gold.signals_donchian(df); trades = find_trades(df, sig)
     sm = summary(trades)
+    write_report(df, trades)
 
     # ---- نمودار ۱: آخرین ۲۲۰ کندل
     N = min(220, len(df)); k = len(df) - N; d = df.iloc[k:]; x = np.arange(N)
