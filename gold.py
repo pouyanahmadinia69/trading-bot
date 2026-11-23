@@ -10,14 +10,23 @@ RR = 2.0  # نسبت سود به ریسک
 RISK_USD = float(os.getenv("RISK_USD", "1"))  # ریسک هر معامله (دلار)
 PER_LOT = 1.0  # سود/ضرر دلاری به ازای هر ۱$ حرکت قیمت برای ۱.۰۰ لات (حساب سنتی XAUUSD_l)
 
+def trim_incomplete(h1, df, now):
+    """کندل ۴ ساعته ناقص را حذف می‌کند. اگر کندل تازه بسته شده (کمتر از ۱۵ دقیقه) ولی
+    آخرین کندل ۱ ساعته‌اش هنوز در داده نیست، صبر می‌کنیم تا اجرای بعدی (داده کامل شود)."""
+    h4 = pd.Timedelta(hours=4)
+    if df.index[-1] + h4 > now:
+        df = df.iloc[:-1]
+    if len(df) and now < df.index[-1] + h4 + pd.Timedelta(minutes=15) and h1.index[-1] < df.index[-1] + pd.Timedelta(hours=3):
+        df = df.iloc[:-1]
+    return df
+
 def load(period="730d"):
     df = yf.download(SYMBOL, period=period, interval="1h", auto_adjust=True, progress=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+    h1 = df
     df = df.resample("4h").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last"}).dropna()
-    if df.index[-1] + pd.Timedelta(hours=4) > pd.Timestamp.now(tz=df.index.tz):
-        df = df.iloc[:-1]  # کندل ناقص حذف شود
-    return df
+    return trim_incomplete(h1, df, pd.Timestamp.now(tz=df.index.tz))
 
 def signals(df):
     o, h, l, c = df["Open"], df["High"], df["Low"], df["Close"]
